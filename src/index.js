@@ -7,7 +7,13 @@ const CSV_URL =
   process.env.PHARMA_CSV_URL ||
   "https://raw.githubusercontent.com/angeldl98/adl-pharma-raw-scraper/master/data/pharmacies.csv";
 
-const pool = new Pool();
+const pool = new Pool({
+  host: process.env.PGHOST || process.env.POSTGRES_HOST || "postgres",
+  user: process.env.PGUSER || process.env.POSTGRES_USER || "adl",
+  password: process.env.PGPASSWORD || process.env.POSTGRES_PASSWORD || "",
+  database: process.env.PGDATABASE || process.env.POSTGRES_DB || "adl_core",
+  port: Number(process.env.PGPORT || "5432")
+});
 
 function checksum(row) {
   const h = createHash("sha256");
