@@ -1,0 +1,13 @@
+{
+  "name": "adl-pharma-raw-scraper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "pg": "^8.11.5"
+  }
+}
+
