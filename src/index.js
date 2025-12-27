@@ -1,11 +1,10 @@
 import { createHash } from "crypto";
 import { Pool } from "pg";
-import fs from "fs";
-import path from "path";
 
-const CSV_URL =
-  process.env.PHARMA_CSV_URL ||
-  "https://raw.githubusercontent.com/angeldl98/adl-pharma-raw-scraper/master/data/pharmacies.csv";
+const CIMA_BASE =
+  process.env.PHARMA_CIMA_URL || "https://cima.aemps.es/cima/rest/medicamentos";
+const PAGE_SIZE = Number(process.env.PHARMA_PAGE_SIZE || "200");
+const MAX_PAGES = Number(process.env.PHARMA_MAX_PAGES || "200"); // safety hard-cap
 
 const pool = new Pool({
   host: process.env.PGHOST || process.env.POSTGRES_HOST || "postgres",
@@ -15,74 +14,97 @@ const pool = new Pool({
   port: Number(process.env.PGPORT || "5432")
 });
 
-function checksum(row) {
+function checksumRecord(rec) {
   const h = createHash("sha256");
-  h.update(row.join("|"));
+  h.update(
+    [
+      rec.nregistro ?? "",
+      String(rec.comerc ?? ""),
+      String(rec.estado?.aut ?? ""),
+      String(rec.estado?.rev ?? ""),
+      String(rec.estado?.susp ?? "")
+    ].join("|")
+  );
   return h.digest("hex");
 }
 
-function parseCsv(text) {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lines.length <= 1) return [];
-  const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const parts = lines[i]
-      .split(",")
-      .map((p) => p.replace(/^"+|"+$/g, "").trim());
-    if (parts.length < 5) continue;
-    const [name, address, municipality, province, status] = parts;
-    rows.push({ name, address, municipality, province, status });
-  }
-  return rows;
-}
-
-async function fetchCsv(url) {
-  const res = await fetch(url, { timeout: 8000 });
-  if (!res.ok) {
-    throw new Error(`fetch_failed status=${res.status}`);
-  }
-  return res.text();
-}
-
 async function ensureTable(client) {
+  await client.query(`CREATE SCHEMA IF NOT EXISTS pharma_raw`);
   await client.query(`
-    CREATE TABLE IF NOT EXISTS pharma_raw (
+    CREATE TABLE IF NOT EXISTS pharma_raw.medicamentos (
       id SERIAL PRIMARY KEY,
-      name TEXT,
-      address TEXT,
-      municipality TEXT,
-      province TEXT,
-      status TEXT,
+      nregistro TEXT,
+      nombre TEXT,
+      labtitular TEXT,
+      labcomercializador TEXT,
+      comerc BOOLEAN,
+      estado_aut BIGINT,
+      estado_rev BIGINT,
+      estado_susp BIGINT,
       checksum TEXT UNIQUE,
+      payload JSONB,
       fetched_at TIMESTAMPTZ DEFAULT now()
     )
   `);
 }
 
+async function fetchPage(page) {
+  const url = `${CIMA_BASE}?pagina=${page}&tamanioPagina=${PAGE_SIZE}`;
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(`fetch_failed status=${res.status} page=${page}`);
+  return res.json();
+}
+
 async function main() {
-  console.log(`[info] PHARMA_RAW_START source=${CSV_URL}`);
+  console.log(`[info] PHARMA_RAW_START source=${CIMA_BASE}`);
   const client = await pool.connect();
   try {
     await ensureTable(client);
-    const csvText =
-      CSV_URL.startsWith("file://")
-        ? fs.readFileSync(path.join(CSV_URL.replace("file://", "")), "utf8")
-        : await fetchCsv(CSV_URL);
-    const rows = parseCsv(csvText);
-    console.log(`[info] parsed rows=${rows.length}`);
+
+    const first = await fetchPage(1);
+    const total = Number(first.totalFilas || 0);
+    const totalPages = Math.min(Math.ceil(total / PAGE_SIZE), MAX_PAGES);
+    console.log(
+      `[info] cima_total=${total} page_size=${PAGE_SIZE} total_pages=${totalPages}`
+    );
+
     let inserted = 0;
-    for (const row of rows) {
-      const cs = checksum([row.name, row.address, row.municipality, row.province, row.status]);
-      await client.query(
-        `
-          INSERT INTO pharma_raw (name, address, municipality, province, status, checksum)
-          VALUES ($1,$2,$3,$4,$5,$6)
-          ON CONFLICT (checksum) DO NOTHING
-        `,
-        [row.name, row.address, row.municipality, row.province, row.status, cs]
-      );
-      inserted += 1;
+    const insertStmt = `
+      INSERT INTO pharma_raw.medicamentos
+        (nregistro, nombre, labtitular, labcomercializador, comerc, estado_aut, estado_rev, estado_susp, checksum, payload)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      ON CONFLICT (checksum) DO NOTHING
+    `;
+
+    const processPage = async (pageData) => {
+      const rows = pageData?.resultados || [];
+      for (const rec of rows) {
+        const cs = checksumRecord(rec);
+        await client.query(insertStmt, [
+          rec.nregistro ?? null,
+          rec.nombre ?? null,
+          rec.labtitular ?? null,
+          rec.labcomercializador ?? null,
+          rec.comerc ?? null,
+          rec.estado?.aut ?? null,
+          rec.estado?.rev ?? null,
+          rec.estado?.susp ?? null,
+          cs,
+          rec ?? null
+        ]);
+        inserted += 1;
+      }
+    };
+
+    await processPage(first);
+    for (let page = 2; page <= totalPages; page++) {
+      const data = await fetchPage(page);
+      await processPage(data);
+      if (page % 10 === 0) {
+        console.log(`[info] processed_page=${page}/${totalPages}`);
+      }
     }
+
     console.log(`[info] PHARMA_RAW_OK inserted=${inserted}`);
     process.exit(0);
   } catch (err) {
