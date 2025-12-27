@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import { Pool } from "pg";
+import axios from "axios";
 
 const CIMA_BASE =
   process.env.PHARMA_CIMA_URL || "https://cima.aemps.es/cima/rest/medicamentos";
@@ -50,9 +51,11 @@ async function ensureTable(client) {
 
 async function fetchPage(page) {
   const url = `${CIMA_BASE}?pagina=${page}&tamanioPagina=${PAGE_SIZE}`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!res.ok) throw new Error(`fetch_failed status=${res.status} page=${page}`);
-  return res.json();
+  const res = await axios.get(url, {
+    timeout: 15000,
+    headers: { Accept: "application/json", "User-Agent": "adl-pharma-raw-scraper/0.1" }
+  });
+  return res.data;
 }
 
 async function main() {
